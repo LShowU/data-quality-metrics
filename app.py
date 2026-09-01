@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from quality import check_quality, read_orders, run_etl
+from quality import check_quality, read_orders, run_etl, quality_trend, rule_distribution
 
 ROOT = Path(__file__).parent
 CSV_PATH = ROOT / "data" / "orders.csv"
@@ -21,7 +21,7 @@ def metric_value(value: object, prefix: str = "", decimals: int = 2) -> str:
 
 
 @st.cache_data
-def load_data(db_path: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def load_data(db_path: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     with sqlite3.connect(db_path) as connection:
         overview = pd.read_sql_query("""SELECT COUNT(*) order_count,
             ROUND(COALESCE(SUM(quantity * unit_price), 0), 2) gmv,
@@ -36,7 +36,11 @@ def load_data(db_path: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, p
             FROM orders GROUP BY product_id ORDER BY gmv DESC""", connection)
         quarantine = pd.read_sql_query("""SELECT source_row, rule, column_name, value, payload
             FROM quarantine ORDER BY source_row""", connection)
-    return overview, daily, products, quarantine
+        history = pd.read_sql_query("""SELECT run_id, run_at, total_rows, valid_rows,
+            issue_count, score, source FROM quality_runs ORDER BY run_at, run_id""", connection)
+        distribution = pd.read_sql_query("""SELECT rule, SUM(issue_count) issue_count
+            FROM quality_run_rules GROUP BY rule ORDER BY issue_count DESC, rule""", connection)
+    return overview, daily, products, quarantine, history, distribution
 
 
 st.set_page_config(page_title="DQ Observatory", page_icon="DQ", layout="wide", initial_sidebar_state="expanded")
@@ -76,7 +80,7 @@ st.markdown("""
 if not DB_PATH.exists():
     run_etl(CSV_PATH, DB_PATH)
 
-overview, daily, products, quarantine = load_data(str(DB_PATH))
+overview, daily, products, quarantine, history, distribution = load_data(str(DB_PATH))
 quality = check_quality(read_orders(CSV_PATH))
 
 with st.sidebar:
@@ -142,6 +146,26 @@ with exception_col:
     else:
         st.dataframe(quarantine[["source_row", "rule", "column_name", "value"]], use_container_width=True, hide_index=True, height=180)
         st.download_button("Download exceptions CSV", quarantine.to_csv(index=False), "quarantine.csv", "text/csv", use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+st.subheader("Quality observability")
+history_col, rules_col = st.columns([1.45, 1])
+with history_col:
+    st.markdown('<div class="panel"><div class="panel-title">Run history / quality trend</div><div class="panel-note">Every ETL execution is retained, including empty or invalid runs.</div>', unsafe_allow_html=True)
+    if history.empty:
+        st.info("No pipeline runs recorded yet.")
+    else:
+        trend = history.set_index("run_at")[["score", "total_rows", "valid_rows", "issue_count"]]
+        st.line_chart(trend[["score"]], color="#087f7b", height=220)
+        st.dataframe(history.sort_values(["run_at", "run_id"], ascending=False), use_container_width=True, hide_index=True, height=180)
+    st.markdown('</div>', unsafe_allow_html=True)
+with rules_col:
+    st.markdown('<div class="panel"><div class="panel-title">Rule distribution</div><div class="panel-note">Cumulative exceptions by rule across retained pipeline runs.</div>', unsafe_allow_html=True)
+    if distribution.empty:
+        st.info("No rule exceptions recorded.")
+    else:
+        st.bar_chart(distribution.set_index("rule")["issue_count"], color="#d97706", height=220)
+        st.dataframe(distribution, use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 st.subheader("Product performance")

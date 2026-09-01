@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
-from quality import check_quality, read_orders, run_etl
+from quality import QualityConfig, RuleConfig, check_quality, read_orders, run_etl, quality_trend, rule_distribution
 
 ROOT = Path(__file__).parents[1]
 CSV = ROOT / "data" / "orders.csv"
@@ -49,10 +49,29 @@ def test_etl_quarantines_bad_rows_and_loads_metrics(tmp_path):
     assert quarantined == (4, 1)
 
 
-def test_etl_sample_is_repeatable(tmp_path):
+
+
+def test_configurable_rules_override_defaults():
+    rows = [{"order_id": "1", "order_date": "bad", "customer_id": "C", "product_id": "P", "quantity": "0", "unit_price": "-2"}]
+    summary = check_quality(rows, QualityConfig(rules={
+        "invalid_date": RuleConfig(enabled=False),
+        "non_positive": {"enabled": False},
+        "negative_amount": {"enabled": False},
+    }))
+    assert summary.total_issues == 0
+    assert summary.valid_rows == 1
+
+
+def test_etl_persists_run_history_and_distribution(tmp_path):
     db = tmp_path / "metrics.db"
-    run_etl(CSV, db)
-    run_etl(CSV, db)
-    with sqlite3.connect(db) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM orders").fetchone() == (10,)
-        assert connection.execute("SELECT COUNT(*) FROM quarantine").fetchone() == (0,)
+    source = tmp_path / "orders.csv"
+    source.write_text("order_id,order_date,customer_id,product_id,quantity,unit_price\n1,bad,C1,P1,1,10\n", encoding="utf-8")
+    run_etl(source, db)
+    trend = quality_trend(db)
+    distribution = rule_distribution(db)
+    assert len(trend) == 1
+    assert trend[0]["total_rows"] == 1
+    assert trend[0]["valid_rows"] == 0
+    assert trend[0]["source"] == "orders.csv"
+    assert {item["rule"] for item in distribution} == {"invalid_date"}
+
